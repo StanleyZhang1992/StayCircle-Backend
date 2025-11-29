@@ -25,8 +25,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    # Create tables automatically on startup for Sprint 1
-    Base.metadata.create_all(bind=engine)
+    # For SQLite dev fallback, auto-create tables; for MySQL we rely on Alembic migrations.
+    if os.getenv("DATABASE_URL", "sqlite:///./data.db").startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)
 
 
 @app.get("/healthz")

@@ -15,11 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/*
 
 # Install Python deps first to leverage Docker layer cache
-COPY backend/requirements.txt .
+COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy application code
-COPY backend/app ./app
+COPY app ./app
 
 # Create non-root user and writable data directory for SQLite when using a volume
 RUN useradd -m -u 1001 appuser && mkdir -p /data && chown -R appuser:appuser /app /data

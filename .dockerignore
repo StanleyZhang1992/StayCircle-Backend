@@ -17,3 +17,7 @@ data/
 *.sqlite
 *.sqlite3
 *.db
+# Ensure needed sources are included in Docker build context
+!requirements.txt
+!app/
+!app/**
