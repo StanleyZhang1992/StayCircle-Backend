@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from .. import models, schemas
+from ..rate_limit import rate_limit
 
 router = APIRouter()
 
@@ -113,7 +114,7 @@ def require_landlord(user: models.User = Depends(get_current_user)) -> models.Us
 # ----------------
 # Routes
 # ----------------
-@router.post("/auth/signup", response_model=schemas.TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/auth/signup", response_model=schemas.TokenResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit("signup"))])
 def signup(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> schemas.TokenResponse:
     # Determine role (default handled by schema)
     role = payload.role or "tenant"
@@ -140,7 +141,7 @@ def signup(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> schema
     )
 
 
-@router.post("/auth/login", response_model=schemas.TokenResponse)
+@router.post("/auth/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limit("login"))])
 def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)) -> schemas.TokenResponse:
     email = payload.email
     user = db.query(models.User).filter(models.User.email == email).first()

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from .. import models, schemas
 from .auth import require_landlord, get_current_user_optional
+from ..rate_limit import rate_limit
 
 router = APIRouter()
 
@@ -28,6 +29,7 @@ def list_properties(db: Session = Depends(get_db), user: Optional[models.User] =
     "/properties",
     response_model=schemas.PropertyRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("write"))],
 )
 def create_property(payload: schemas.PropertyCreate, db: Session = Depends(get_db), user: models.User = Depends(require_landlord)):
     # Basic server-side validation already handled by Pydantic types.
