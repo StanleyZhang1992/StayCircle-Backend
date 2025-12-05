@@ -111,6 +111,12 @@ def require_landlord(user: models.User = Depends(get_current_user)) -> models.Us
     return user
 
 
+def require_tenant(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role != "tenant":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant role required")
+    return user
+
+
 # ----------------
 # Routes
 # ----------------

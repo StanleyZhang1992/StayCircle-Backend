@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator, EmailStr
 from typing import Literal
+from datetime import date
 
 
 class PropertyBase(BaseModel):
@@ -21,6 +22,27 @@ class PropertyCreate(PropertyBase):
 
 class PropertyRead(PropertyBase):
     id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ----------------
+# Booking Schemas
+# ----------------
+class BookingBase(BaseModel):
+    property_id: int = Field(..., ge=1)
+    start_date: date
+    end_date: date
+
+
+class BookingCreate(BookingBase):
+    pass
+
+
+class BookingRead(BookingBase):
+    id: int
+    guest_id: int
+    status: Literal["reserved", "cancelled"] = "reserved"
 
     model_config = ConfigDict(from_attributes=True)
 

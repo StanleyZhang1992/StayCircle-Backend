@@ -5,6 +5,7 @@ import os
 from .db import Base, engine
 from .routes.properties import router as properties_router
 from .routes.auth import router as auth_router
+from .routes.bookings import router as bookings_router
 
 app = FastAPI(title="StayCircle API", version="0.1.0")
 
@@ -38,3 +39,4 @@ def healthz() -> dict:
 # API routes
 app.include_router(auth_router, prefix="", tags=["auth"])
 app.include_router(properties_router, prefix="/api/v1", tags=["properties"])
+app.include_router(bookings_router, prefix="/api/v1", tags=["bookings"])
