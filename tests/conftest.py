@@ -9,6 +9,12 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 os.environ.setdefault("REDIS_ENABLED", "false")
 os.environ.setdefault("STAYCIRCLE_JWT_SECRET", "test-secret")
 
+import sys
+# Ensure the backend/ directory is on sys.path so 'app' resolves when running pytest from repo root.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 from app.main import app  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 

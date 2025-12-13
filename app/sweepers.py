@@ -33,7 +33,12 @@ def sweep_expired_bookings(db: Optional[Session] = None) -> int:
         )
         for obj in items:
             # Idempotent guard
-            if obj.status == "pending_payment" and obj.expires_at and obj.expires_at < now:
+            # Normalize expires_at to timezone-aware UTC for safe comparison.
+            exp = obj.expires_at
+            if exp is not None and getattr(exp, "tzinfo", None) is None:
+                # Some backends (e.g., SQLite) may return naive datetimes; treat stored values as UTC.
+                exp = exp.replace(tzinfo=timezone.utc)
+            if obj.status == "pending_payment" and exp and exp < now:
                 obj.status = "cancelled_expired"
                 if not obj.cancel_reason:
                     obj.cancel_reason = "expired"
