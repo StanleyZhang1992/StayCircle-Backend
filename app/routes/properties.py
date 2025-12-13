@@ -33,7 +33,12 @@ def list_properties(db: Session = Depends(get_db), user: Optional[models.User] =
 )
 def create_property(payload: schemas.PropertyCreate, db: Session = Depends(get_db), user: models.User = Depends(require_landlord)):
     # Basic server-side validation already handled by Pydantic types.
-    obj = models.Property(owner_id=user.id, title=payload.title, price_cents=payload.price_cents)
+    obj = models.Property(
+        owner_id=user.id,
+        title=payload.title,
+        price_cents=payload.price_cents,
+        requires_approval=payload.requires_approval,
+    )
     db.add(obj)
     db.commit()
     db.refresh(obj)

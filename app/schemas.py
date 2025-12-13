@@ -1,11 +1,12 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator, EmailStr
-from typing import Literal
-from datetime import date
+from typing import Literal, Union, Optional
+from datetime import date, datetime
 
 
 class PropertyBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     price_cents: int = Field(..., ge=0)
+    requires_approval: bool = False
 
     @field_validator("title", mode="before")
     @classmethod
@@ -42,9 +43,37 @@ class BookingCreate(BookingBase):
 class BookingRead(BookingBase):
     id: int
     guest_id: int
-    status: Literal["reserved", "cancelled"] = "reserved"
+    status: Literal[
+        "requested",
+        "pending_payment",
+        "confirmed",
+        "cancelled",
+        "cancelled_expired",
+        "declined",
+    ]
+    total_cents: int
+    currency: str = "USD"
+    expires_at: Optional[datetime] = None
+    cancel_reason: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ----------------
+# Booking Create Response (Sprint 7)
+# ----------------
+class NextActionAwaitApproval(BaseModel):
+    type: Literal["await_approval"]
+
+
+class NextActionPay(BaseModel):
+    type: Literal["pay"]
+    expires_at: datetime
+
+
+class BookingCreateResponse(BaseModel):
+    booking: BookingRead
+    next_action: Union[NextActionAwaitApproval, NextActionPay]
 
 
 # ----------------

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Date, DateTime, Index, func
+from sqlalchemy import Column, Integer, String, ForeignKey, Date, DateTime, Index, func, Boolean
 from sqlalchemy.orm import declarative_mixin
 
 from .db import Base
@@ -27,6 +27,7 @@ class Property(Base, TimestampMixin):
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     title = Column(String, nullable=False)
     price_cents = Column(Integer, nullable=False)
+    requires_approval = Column(Boolean, nullable=False, default=False)
 
 
 class Booking(Base, TimestampMixin):
@@ -37,11 +38,17 @@ class Booking(Base, TimestampMixin):
     guest_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     start_date = Column(Date, nullable=False, index=True)
     end_date = Column(Date, nullable=False, index=True)
-    status = Column(String(20), nullable=False, default="reserved")
+    status = Column(String(20), nullable=False, default="requested")
+    total_cents = Column(Integer, nullable=False)
+    currency = Column(String(3), nullable=False, default="USD")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_reason = Column(String(255), nullable=True)
     # incremented on each update to support optimistic concurrency if/when used
     version = Column(Integer, nullable=False, default=1)
 
     __table_args__ = (
         Index("ix_bookings_property_start", "property_id", "start_date"),
         Index("ix_bookings_property_end", "property_id", "end_date"),
+        Index("ix_bookings_status", "status"),
+        Index("ix_bookings_expires_at", "expires_at"),
     )

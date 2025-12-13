@@ -1,11 +1,31 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import threading
+import time
 
 from .db import Base, engine
 from .routes.properties import router as properties_router
 from .routes.auth import router as auth_router
 from .routes.bookings import router as bookings_router
+from .sweepers import sweep_expired_bookings
+
+
+def _start_expiry_sweeper(interval_seconds: int = 60) -> None:
+    """
+    Background thread that sweeps expired pending_payment bookings every interval.
+    """
+    def _loop() -> None:
+        while True:
+            try:
+                sweep_expired_bookings()
+            except Exception:
+                # Avoid crashing the thread on transient DB errors; will try again next tick.
+                pass
+            time.sleep(interval_seconds)
+
+    t = threading.Thread(target=_loop, name="booking-expiry-sweeper", daemon=True)
+    t.start()
 
 app = FastAPI(title="StayCircle API", version="0.1.0")
 
@@ -29,6 +49,8 @@ def on_startup() -> None:
     # For SQLite dev fallback, auto-create tables; for MySQL we rely on Alembic migrations.
     if os.getenv("DATABASE_URL", "sqlite:///./data.db").startswith("sqlite"):
         Base.metadata.create_all(bind=engine)
+    # Start background sweeper for expired holds (runs every 60s)
+    _start_expiry_sweeper(interval_seconds=60)
 
 
 @app.get("/healthz")
