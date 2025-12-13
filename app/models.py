@@ -41,6 +41,7 @@ class Booking(Base, TimestampMixin):
     status = Column(String(20), nullable=False, default="requested")
     total_cents = Column(Integer, nullable=False)
     currency = Column(String(3), nullable=False, default="USD")
+    payment_intent_id = Column(String(255), nullable=True, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     cancel_reason = Column(String(255), nullable=True)
     # incremented on each update to support optimistic concurrency if/when used

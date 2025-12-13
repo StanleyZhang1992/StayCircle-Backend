@@ -69,12 +69,21 @@ class NextActionAwaitApproval(BaseModel):
 class NextActionPay(BaseModel):
     type: Literal["pay"]
     expires_at: datetime
+    client_secret: str
 
 
 class BookingCreateResponse(BaseModel):
     booking: BookingRead
     next_action: Union[NextActionAwaitApproval, NextActionPay]
 
+
+# ----------------
+# Payments (Sprint 8)
+# ----------------
+class PaymentInfoResponse(BaseModel):
+    booking_id: int
+    client_secret: str
+    expires_at: datetime
 
 # ----------------
 # Auth/User Schemas

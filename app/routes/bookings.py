@@ -11,11 +11,13 @@ from .. import models, schemas
 from ..locks import redis_try_lock
 from ..rate_limit import rate_limit
 from .auth import get_current_user, require_tenant, require_landlord
+import os
+from ..payments import create_payment_intent, retrieve_client_secret, stripe_enabled
 
 router = APIRouter()
 
 # Sprint 7 hold configuration (wired from env in Sprint 8). Minutes to hold a pending payment.
-HOLD_MINUTES = 15
+HOLD_MINUTES = int(os.getenv("HOLD_MINUTES", "15"))
 
 
 def _validate_dates(start_date: date, end_date: date) -> None:
@@ -95,11 +97,9 @@ def create_booking(
             if getattr(prop, "requires_approval", False):
                 status_val = "requested"
                 expires_at = None
-                next_action: dict = {"type": "await_approval"}
             else:
                 status_val = "pending_payment"
                 expires_at = now + timedelta(minutes=HOLD_MINUTES)
-                next_action = {"type": "pay", "expires_at": expires_at}
 
             obj = models.Booking(
                 property_id=payload.property_id,
@@ -115,6 +115,29 @@ def create_booking(
             db.add(obj)
             db.commit()
             db.refresh(obj)
+
+            next_action: dict
+            if obj.status == "pending_payment":
+                # Ensure PaymentIntent exists and return client_secret
+                idem_key = f"booking:{obj.id}:v{obj.version or 1}"
+                if not obj.payment_intent_id:
+                    pi_id, client_secret = create_payment_intent(
+                        amount_cents=obj.total_cents,
+                        currency=obj.currency,
+                        booking_id=obj.id,
+                        property_id=obj.property_id,
+                        idempotency_key=idem_key,
+                    )
+                    obj.payment_intent_id = pi_id
+                    db.add(obj)
+                    db.commit()
+                else:
+                    # Retrieve client_secret for existing intent
+                    client_secret = retrieve_client_secret(obj.payment_intent_id)
+                next_action = {"type": "pay", "expires_at": obj.expires_at, "client_secret": client_secret}
+            else:
+                next_action = {"type": "await_approval"}
+
             # Response contract includes booking and next_action
             return {"booking": obj, "next_action": next_action}  # type: ignore[return-value]
         except HTTPException:
