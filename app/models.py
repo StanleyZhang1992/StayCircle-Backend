@@ -53,3 +53,17 @@ class Booking(Base, TimestampMixin):
         Index("ix_bookings_status", "status"),
         Index("ix_bookings_expires_at", "expires_at"),
     )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    text = Column(String(1000), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_messages_property_created_at", "property_id", "created_at"),
+    )

@@ -139,3 +139,28 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserRead
+
+
+# ----------------
+# Messages (Sprint 9A)
+# ----------------
+class MessageRead(BaseModel):
+    id: int
+    property_id: int
+    sender_id: int
+    text: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MessageCreate(BaseModel):
+    property_id: int
+    text: str = Field(..., min_length=1, max_length=1000)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def normalize_text(cls, v: str) -> str:
+        if isinstance(v, str):
+            v = v.strip()
+        return v
