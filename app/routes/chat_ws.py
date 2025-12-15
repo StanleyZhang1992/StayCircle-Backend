@@ -9,6 +9,8 @@ from typing import Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from starlette.websockets import WebSocketState
 from sqlalchemy.orm import Session
+import threading
+from ..redis_client import get_redis, is_redis_enabled
 
 from ..db import SessionLocal
 from .. import models
@@ -85,6 +87,65 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+def start_redis_subscriber(loop: asyncio.AbstractEventLoop) -> None:
+    """
+    Start a background thread that subscribes to chat:property:* and broadcasts
+    incoming messages to local WS connections. Best-effort fail-open.
+    """
+    if not is_redis_enabled():
+        logger.info("redis.subscriber.disabled")
+        return
+
+    def _run() -> None:
+        backoff = 0.5
+        max_backoff = 5.0
+        while True:
+            try:
+                r = get_redis()
+                if r is None:
+                    time.sleep(min(backoff, max_backoff))
+                    backoff = min(max_backoff, backoff * 2)
+                    continue
+
+                pubsub = r.pubsub()
+                pubsub.psubscribe("chat:property:*")
+                logger.info("redis.subscriber.started", extra={})
+                backoff = 0.5  # reset on success
+                for message in pubsub.listen():
+                    if message is None:
+                        continue
+                    if message.get("type") != "pmessage":
+                        continue
+                    data = message.get("data")
+                    try:
+                        if isinstance(data, bytes):
+                            data_str = data.decode("utf-8")
+                        else:
+                            data_str = str(data)
+                        # Broadcast payload as-is; clients de-dup by id if needed
+                        # Extract property_id for routing
+                        try:
+                            payload = json.loads(data_str)
+                            prop_id = int(payload.get("property_id"))
+                        except Exception:
+                            # Fallback parse from channel if payload missing or malformed
+                            channel = message.get("channel")
+                            if isinstance(channel, bytes):
+                                channel = channel.decode("utf-8")
+                            prop_id = int(str(channel).split(":")[-1])
+                        asyncio.run_coroutine_threadsafe(manager.broadcast(prop_id, data_str), loop)
+                    except Exception:
+                        # swallow and continue
+                        continue
+            except Exception:
+                # reconnect with backoff
+                time.sleep(min(backoff, max_backoff))
+                backoff = min(max_backoff, backoff * 2)
+
+    t = threading.Thread(target=_run, name="redis-subscriber", daemon=True)
+    t.start()
 
 
 def _get_token_from_ws(websocket: WebSocket) -> Optional[str]:
@@ -221,6 +282,14 @@ async def property_chat(websocket: WebSocket, property_id: int) -> None:
             out_text = json.dumps(out)
 
             await manager.broadcast(property_id, out_text)
+            # Optional Redis publish for cross-process fan-out
+            try:
+                r = get_redis()
+                if r is not None:
+                    channel = f"chat:property:{property_id}"
+                    r.publish(channel, out_text)
+            except Exception:
+                logger.warning("redis.publish.failed", extra={"property_id": property_id})
 
             logger.info(
                 "chat.ws.message",

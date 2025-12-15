@@ -9,7 +9,7 @@ from .routes.properties import router as properties_router
 from .routes.auth import router as auth_router
 from .routes.bookings import router as bookings_router
 from .routes.messages import router as messages_router
-from .routes.chat_ws import router as chat_ws_router
+from .routes.chat_ws import router as chat_ws_router, start_redis_subscriber
 from .payments import router as payments_router
 from .sweepers import sweep_expired_bookings
 
@@ -64,6 +64,14 @@ def on_startup() -> None:
         Base.metadata.create_all(bind=engine)
     # Start background sweeper for expired holds (runs every 60s)
     _start_expiry_sweeper(interval_seconds=60)
+    # Start Redis Pub/Sub subscriber for cross-process chat fan-out (if enabled)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        start_redis_subscriber(loop)
+    except Exception:
+        # Fail-open if Redis is disabled/unavailable
+        pass
 
 
 @app.get("/healthz")
