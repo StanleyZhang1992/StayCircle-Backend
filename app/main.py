@@ -9,6 +9,7 @@ from .routes.properties import router as properties_router
 from .routes.auth import router as auth_router
 from .routes.bookings import router as bookings_router
 from .routes.messages import router as messages_router
+from .routes.chat_ws import router as chat_ws_router
 from .payments import router as payments_router
 from .sweepers import sweep_expired_bookings
 
@@ -76,3 +77,4 @@ app.include_router(payments_router, prefix="", tags=["payments"])
 app.include_router(properties_router, prefix="/api/v1", tags=["properties"])
 app.include_router(bookings_router, prefix="/api/v1", tags=["bookings"])
 app.include_router(messages_router, prefix="/api/v1", tags=["messages"])
+app.include_router(chat_ws_router, prefix="/ws", tags=["chat"])
