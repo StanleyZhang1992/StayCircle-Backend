@@ -1,3 +1,5 @@
+# SQLAlchemy ORM models for core domain tables (users, properties, bookings, messages).
+# Keep business logic out of models; favor services and transactional logic in route handlers/services.
 from sqlalchemy import Column, Integer, String, ForeignKey, Date, DateTime, Index, func, Boolean
 from sqlalchemy.orm import declarative_mixin
 
@@ -6,12 +8,22 @@ from .db import Base
 
 @declarative_mixin
 class TimestampMixin:
-    # UTC-aware timestamps
+    """Common UTC-aware timestamps automatically managed by the database.
+
+    - created_at: set on insert
+    - updated_at: set on insert and updated on each modification
+    """
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class User(Base, TimestampMixin):
+    """Application user account.
+
+    Roles:
+    - landlord: can list/manage properties
+    - tenant: can book properties and message hosts
+    """
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -21,6 +33,7 @@ class User(Base, TimestampMixin):
 
 
 class Property(Base, TimestampMixin):
+    """Rental listing created and managed by a landlord."""
     __tablename__ = "properties"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -31,6 +44,14 @@ class Property(Base, TimestampMixin):
 
 
 class Booking(Base, TimestampMixin):
+    """Reservation record for a property.
+
+    Status transitions (simplified):
+    requested -> pending_payment -> confirmed
+                         └── cancelled / declined / cancelled_expired
+
+    'version' supports optimistic concurrency control for safe, idempotent updates.
+    """
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -47,6 +68,7 @@ class Booking(Base, TimestampMixin):
     # incremented on each update to support optimistic concurrency if/when used
     version = Column(Integer, nullable=False, default=1)
 
+    # Indexed access patterns: by property/date ranges, status, and expiry for background sweeps
     __table_args__ = (
         Index("ix_bookings_property_start", "property_id", "start_date"),
         Index("ix_bookings_property_end", "property_id", "end_date"),
@@ -56,6 +78,7 @@ class Booking(Base, TimestampMixin):
 
 
 class Message(Base):
+    """Chat message associated with a property conversation."""
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -64,6 +87,7 @@ class Message(Base):
     text = Column(String(1000), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    # Composite index to paginate and filter messages per property in chronological order
     __table_args__ = (
         Index("ix_messages_property_created_at", "property_id", "created_at"),
     )

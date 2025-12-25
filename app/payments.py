@@ -1,3 +1,6 @@
+# Payments module: Stripe integration with test-friendly fallbacks.
+# Exposes endpoints to create PaymentIntents, fetch client secrets, finalize bookings, and handle webhooks.
+# When Stripe keys are absent, operates in deterministic offline mode for local/dev and CI.
 from __future__ import annotations
 
 import os
@@ -10,23 +13,25 @@ from .db import get_db
 from . import models, schemas
 from .routes.auth import require_tenant
 
-# Stripe SDK is optional at runtime (tests/CI may not provide keys)
+# Stripe SDK is optional; tests/CI may omit keys to stay fully offline.
 try:
     import stripe  # type: ignore
 except Exception:  # pragma: no cover
     stripe = None  # type: ignore
 
+# Router namespace for payment-related HTTP endpoints
 router = APIRouter()
 
-# ENV
+# Environment configuration (blank values disable Stripe features in dev/tests)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 
 
 def stripe_enabled() -> bool:
     """
-    Returns True only if Stripe SDK is importable and STRIPE_SECRET_KEY is present.
-    Tests/CI can run with this disabled to avoid network calls.
+    True only when the Stripe SDK is importable and STRIPE_SECRET_KEY is set.
+
+    When False, endpoints use deterministic, network-free behavior for tests/dev.
     """
     return bool(stripe and STRIPE_SECRET_KEY)
 
@@ -45,8 +50,10 @@ def create_payment_intent(
     idempotency_key: str,
 ) -> Tuple[str, str]:
     """
-    Create a Stripe PaymentIntent (test mode) and return (payment_intent_id, client_secret).
-    If Stripe is disabled (e.g., tests), return deterministic fake values that look like real IDs.
+    Create a PaymentIntent and return (payment_intent_id, client_secret).
+
+    - Production: goes through Stripe (test keys) with automatic_payment_methods for PaymentElement.
+    - Dev/CI without Stripe: returns deterministic fake values to keep flows testable/offline.
     """
     if not stripe_enabled():
         # Local/test fallback: generate synthetic IDs and secrets (no network calls)
@@ -63,11 +70,9 @@ def create_payment_intent(
         automatic_payment_methods={"enabled": True},
         idempotency_key=idempotency_key,
     )
-    # Ensure idempotency on the transport-layer via HTTP header
-    # The python SDK uses 'idempotency_key' via request options
-    # NOTE: Because we used a separate create() above, to strictly honor idempotency key,
-    # callers should rely on SDK's idempotency. Here for simplicity we re-issue with same key if needed.
-    # In practice, retries should pass the same idempotency_key for the same logical request.
+    # Idempotency: the Python SDK accepts idempotency_key via request options.
+    # Clients must reuse the same key when retrying the same logical request.
+    # Here we derive a stable key from booking/version to make retries safe.
 
     # Retrieve client secret
     client_secret: Optional[str] = getattr(pi, "client_secret", None)
@@ -82,8 +87,9 @@ def create_payment_intent(
 
 def retrieve_client_secret(payment_intent_id: str) -> str:
     """
-    Retrieve a client_secret for an existing PaymentIntent.
-    If Stripe is disabled (e.g., tests), synthesize a fake secret deterministically.
+    Return the client_secret for an existing PaymentIntent.
+
+    Offline mode: when Stripe is disabled, synthesize a deterministic secret so the UI can render.
     """
     if not stripe_enabled():
         # Synthesize a deterministic secret for UI rendering in tests
@@ -103,8 +109,11 @@ def get_payment_info(
     user: models.User = Depends(require_tenant),
 ) -> schemas.PaymentInfoResponse:
     """
-    Ensure a PaymentIntent exists for a pending_payment booking and return its client_secret + expires_at.
-    Only the booking's tenant may access this.
+    Ensure a PaymentIntent exists for a 'pending_payment' booking and return:
+    - client_secret for the frontend PaymentElement
+    - expires_at (hold deadline) for rendering timers
+
+    Authorization: only the booking's tenant may access.
     """
     booking = db.get(models.Booking, booking_id)
     if not booking:
@@ -139,9 +148,9 @@ def get_payment_info(
         db.add(booking)
         db.commit()
     else:
-        # If Stripe enabled, inspect existing PaymentIntent status:
-        # - canceled: create a fresh PaymentIntent and update booking
-        # - succeeded: finalize booking (mirror webhook) and stop pay flow
+        # If Stripe is enabled, inspect the existing PaymentIntent status:
+        # - canceled: create a fresh intent and update the booking/version
+        # - succeeded: finalize booking (webhook mirror) and short-circuit the pay flow
         if stripe_enabled():
             try:
                 pi = stripe.PaymentIntent.retrieve(booking.payment_intent_id)
@@ -192,7 +201,7 @@ def get_payment_info(
                     db.commit()
                 else:
                     db.rollback()
-                # Surface a user-friendly error; UI should refresh to reflect confirmed
+                # Return a user-friendly error; the UI should refresh to reflect 'confirmed'
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Booking already paid")
 
     if client_secret is None:
@@ -211,8 +220,11 @@ def finalize_payment(
     user: models.User = Depends(require_tenant),
 ):
     """
-    Explicitly finalize a booking after client-side confirmation when webhooks are not used.
-    Idempotent: returns the confirmed booking if already confirmed, 202 if still processing.
+    Finalize a booking after client-side confirmation when webhooks are unavailable.
+
+    Idempotency:
+    - Already confirmed: return the confirmed booking
+    - Still processing: return a 'processing' status so the client can poll
     """
     # Lookup and basic auth
     booking: Optional[models.Booking] = db.get(models.Booking, booking_id)
@@ -240,7 +252,7 @@ def finalize_payment(
     if exp <= now:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment hold expired")
 
-    # Stripe required to check PaymentIntent status
+    # Stripe must be enabled to check PaymentIntent status
     if not stripe_enabled():
         return {"status": "stripe_disabled"}
 
@@ -299,7 +311,9 @@ def finalize_payment(
 
 def _has_confirmed_overlap(db: Session, property_id: int, start_date, end_date) -> bool:
     """
-    Overlap check against confirmed bookings only:
+    Return True if any confirmed booking overlaps the given [start_date, end_date).
+
+    Overlap logic:
     NOT (existing.end_date <= start_date OR existing.start_date >= end_date)
     """
     exists = (
@@ -324,10 +338,11 @@ async def stripe_webhook(
     stripe_signature: str = Header(None, alias="Stripe-Signature"),
 ) -> dict:
     """
-    Verify Stripe signature and handle payment_intent.succeeded (idempotent finalize).
-    Returns 200 on success or safe no-ops. 4xx only for invalid payload/signature.
+    Verify Stripe signature and handle payment_intent.succeeded by finalizing a booking idempotently.
+
+    Always return 200 for successful processing or safe no-ops; return 4xx only for invalid payload/signature.
     """
-    # If Stripe disabled, accept as no-op for local testing convenience
+    # If Stripe is disabled, accept as a no-op to keep local/dev flows simple
     if not stripe_enabled():
         return {"status": "stripe_disabled"}
 
@@ -358,7 +373,7 @@ async def stripe_webhook(
             db.query(models.Booking).filter(models.Booking.payment_intent_id == payment_intent_id).first()
         )
         if not booking:
-            # Unknown intent; accept to avoid retries storm but log if needed
+            # Unknown intent; accept to avoid a retry storm (could log for investigation)
             return {"status": "unknown_intent"}
 
         # Preconditions
@@ -380,11 +395,11 @@ async def stripe_webhook(
         if exp <= now:
             return {"status": "expired"}  # ignore late
 
-        # Defensive overlap check vs confirmed
+        # Defensive overlap check against confirmed bookings
         if _has_confirmed_overlap(db, booking.property_id, booking.start_date, booking.end_date):
             return {"status": "overlap_conflict"}  # ignore/alert; do not confirm
 
-        # Optimistic concurrency finalize
+        # Finalize using optimistic concurrency control
         current_version = booking.version or 1
         rows = (
             db.query(models.Booking)
@@ -402,7 +417,7 @@ async def stripe_webhook(
             )
         )
         if rows == 0:
-            # Re-read to determine state
+            # Re-read to determine the latest state
             db.rollback()  # rollback pending transaction to clear write intents
             latest = db.query(models.Booking).get(booking.id)
             if latest and latest.status == "confirmed":
@@ -412,7 +427,7 @@ async def stripe_webhook(
         db.commit()
         return {"status": "confirmed"}
 
-    # Optionally log failures, but do not error
+    # Optionally log failures; do not error
     if event_type == "payment_intent.payment_failed":
         return {"status": "payment_failed_observed"}
 

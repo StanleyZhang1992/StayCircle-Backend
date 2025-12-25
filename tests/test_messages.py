@@ -1,3 +1,4 @@
+# Messages HTTP API test suite: ordering, pagination, and authorization checks.
 from __future__ import annotations
 
 from typing import Tuple, List
@@ -8,6 +9,7 @@ from app.db import SessionLocal
 from app import models
 
 
+# Helper: create a user and return (access_token, user JSON)
 def signup(client: TestClient, email: str, password: str, role: str | None = None) -> Tuple[str, dict]:
     payload = {"email": email, "password": password}
     if role:
@@ -18,10 +20,12 @@ def signup(client: TestClient, email: str, password: str, role: str | None = Non
     return data["access_token"], data["user"]
 
 
+# Convenience header for authenticated requests
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+# Helper: create a property owned by the authenticated landlord
 def create_property(client: TestClient, token: str, title: str, price_cents: int, requires_approval: bool = False) -> dict:
     r = client.post(
         "/api/v1/properties",
@@ -34,7 +38,10 @@ def create_property(client: TestClient, token: str, title: str, price_cents: int
 
 def insert_messages(property_id: int, sender_id: int, texts: List[str]) -> List[int]:
     """
-    Insert messages for a property from a single sender; returns created IDs in insertion order.
+    Insert messages for a property from a single sender.
+
+    Returns:
+    - List of created message IDs in insertion order.
     """
     db = SessionLocal()
     ids: List[int] = []
@@ -50,6 +57,7 @@ def insert_messages(property_id: int, sender_id: int, texts: List[str]) -> List[
     return ids
 
 
+# History: results are ordered asc by created_at,id and since_id paginates strictly forward
 def test_messages_history_ordering_and_pagination(client: TestClient):
     # Setup: landlord owner, property, tenant
     landlord_token, landlord = signup(client, "owner@example.com", "changeme123", "landlord")
@@ -78,6 +86,7 @@ def test_messages_history_ordering_and_pagination(client: TestClient):
     assert [m["id"] for m in page2] == ids[2:], page2
 
 
+# Authorization: only the owner landlord can read history for their property
 def test_messages_authz_landlord_owner_allowed_and_non_owner_forbidden(client: TestClient):
     # Landlord A owns property; Landlord B does not
     token_a, user_a = signup(client, "hostA@example.com", "changeme123", "landlord")
@@ -98,6 +107,7 @@ def test_messages_authz_landlord_owner_allowed_and_non_owner_forbidden(client: T
     assert r_forbidden.status_code == 403, r_forbidden.text
 
 
+# Authorization: tenant allowed, anonymous denied (401)
 def test_messages_authz_tenant_allowed_and_anonymous_denied(client: TestClient):
     # Setup property with owner and tenant
     landlord_token, landlord = signup(client, "hostC@example.com", "changeme123", "landlord")
@@ -114,6 +124,7 @@ def test_messages_authz_tenant_allowed_and_anonymous_denied(client: TestClient):
     assert r_anon.status_code == 401
 
 
+# Validation: limit bounds enforced by FastAPI (0 and >100 rejected)
 def test_messages_limit_bounds_validation(client: TestClient):
     landlord_token, _ = signup(client, "hostD@example.com", "changeme123", "landlord")
     prop = create_property(client, landlord_token, "Bounds Place", 5000, requires_approval=False)

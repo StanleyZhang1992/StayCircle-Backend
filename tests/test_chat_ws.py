@@ -1,3 +1,4 @@
+# WebSocket chat test suite: connection auth, owner checks, broadcast/persistence, and rate limiting.
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from app.db import SessionLocal
 from app import models
 
 
+# Helper: create a user and return (access_token, user JSON)
 def signup(client: TestClient, email: str, password: str, role: str | None = None) -> Tuple[str, dict]:
     payload = {"email": email, "password": password}
     if role:
@@ -20,10 +22,12 @@ def signup(client: TestClient, email: str, password: str, role: str | None = Non
     return data["access_token"], data["user"]
 
 
+# Convenience header for authenticated requests
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+# Helper: create a property owned by the authenticated landlord
 def create_property(client: TestClient, token: str, title: str, price_cents: int, requires_approval: bool = False) -> dict:
     r = client.post(
         "/api/v1/properties",
@@ -34,6 +38,7 @@ def create_property(client: TestClient, token: str, title: str, price_cents: int
     return r.json()
 
 
+# Helper: count persisted messages for a property (verifies DB write on WS send)
 def count_messages_for_property(property_id: int) -> int:
     db = SessionLocal()
     try:
@@ -42,6 +47,7 @@ def count_messages_for_property(property_id: int) -> int:
         db.close()
 
 
+# Round-trip: tenant and owner landlord connect, tenant sends, both receive, and message persists
 def test_ws_connect_tenant_and_landlord_owner_roundtrip(client: TestClient):
     # Setup users and a property
     landlord_token, landlord = signup(client, "hostws@example.com", "changeme123", "landlord")
@@ -72,6 +78,7 @@ def test_ws_connect_tenant_and_landlord_owner_roundtrip(client: TestClient):
         assert after == before + 1
 
 
+# Authorization: non-owner landlord should be refused at handshake
 def test_ws_landlord_non_owner_forbidden(client: TestClient):
     token_a, user_a = signup(client, "hostA-ws@example.com", "changeme123", "landlord")
     token_b, user_b = signup(client, "hostB-ws@example.com", "changeme123", "landlord")
@@ -86,6 +93,7 @@ def test_ws_landlord_non_owner_forbidden(client: TestClient):
         pass
 
 
+# Authentication: missing token results in denied connection
 def test_ws_missing_token_denied(client: TestClient):
     # No token query param or header
     try:
@@ -95,6 +103,7 @@ def test_ws_missing_token_denied(client: TestClient):
         pass
 
 
+# Validation + rate limit: invalid payload yields error; burst exceeds limiter; refill allows another send
 def test_ws_validation_and_rate_limit(client: TestClient):
     landlord_token, _ = signup(client, "hostrate@example.com", "changeme123", "landlord")
     prop = create_property(client, landlord_token, "Rate WS", 22222, requires_approval=False)

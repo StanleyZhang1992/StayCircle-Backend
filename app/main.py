@@ -1,3 +1,4 @@
+# Application entrypoint: configures middleware, startup routines, and API routers.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -16,14 +17,19 @@ from .sweepers import sweep_expired_bookings
 
 def _start_expiry_sweeper(interval_seconds: int = 60) -> None:
     """
-    Background thread that sweeps expired pending_payment bookings every interval.
+    Launch a daemon thread that periodically releases bookings stuck in 'pending_payment'.
+
+    Behavior:
+    - Call sweep_expired_bookings()
+    - Sleep for `interval_seconds`
+    Any exception is swallowed to keep the worker alive; it will try again on the next interval.
     """
     def _loop() -> None:
         while True:
             try:
                 sweep_expired_bookings()
             except Exception:
-                # Avoid crashing the thread on transient DB errors; will try again next tick.
+                # Keep the worker alive on transient errors; retry on the next interval.
                 pass
             time.sleep(interval_seconds)
 
@@ -31,6 +37,8 @@ def _start_expiry_sweeper(interval_seconds: int = 60) -> None:
     t.start()
 
 
+# Parse CORS origins from a comma-separated env var.
+# Note: '*' cannot be used with allow_credentials=True; we fall back to explicit localhost origins for dev.
 def _parse_cors_origins(env_value: str | None) -> list[str]:
     default_dev_origins = [
         "http://localhost:3000",
@@ -41,7 +49,7 @@ def _parse_cors_origins(env_value: str | None) -> list[str]:
         return default_dev_origins
     
     origins = [o.strip() for o in env_value.split(",") if o.strip()]
-    # Wildcard is mapped to explicit dev origins so credentials can work
+    # Map '*' to explicit localhost origins so credentialed requests remain allowed
     if "*" in origins:
         return default_dev_origins
 
@@ -62,27 +70,28 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    # For SQLite dev fallback, auto-create tables; for MySQL we rely on Alembic migrations.
+    # For local SQLite, auto-create tables; production DBs rely on Alembic migrations.
     if os.getenv("DATABASE_URL", "sqlite:///./data.db").startswith("sqlite"):
         Base.metadata.create_all(bind=engine)
-    # Start background sweeper for expired holds (runs every 60s)
+    # Kick off the background sweeper that releases expired holds (every 60s)
     _start_expiry_sweeper(interval_seconds=60)
-    # Start Redis Pub/Sub subscriber for cross-process chat fan-out (if enabled)
+    # Start the Redis Pub/Sub subscriber used to fan out chat messages across processes
     try:
         import asyncio
         loop = asyncio.get_event_loop()
         start_redis_subscriber(loop)
     except Exception:
-        # Fail-open if Redis is disabled/unavailable
+        # Fail open: if Redis is absent, the API still starts; chat fan-out simply won't run
         pass
 
 
+# Simple liveness endpoint for container orchestrators and uptime checks
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok"}
 
 
-# API routes
+# Mount application routers (authentication, payments, domain APIs, and WebSocket chat)
 app.include_router(auth_router, prefix="", tags=["auth"])
 app.include_router(payments_router, prefix="", tags=["payments"])
 app.include_router(properties_router, prefix="/api/v1", tags=["properties"])

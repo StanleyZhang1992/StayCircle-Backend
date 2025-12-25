@@ -1,3 +1,4 @@
+# Booking API test suite: happy paths, approval flow, overlap rules, expiry sweeper, and authorization checks.
 from __future__ import annotations
 
 from typing import Tuple
@@ -11,6 +12,7 @@ from app.db import SessionLocal
 from app import models
 
 
+# Helper: create a user and return (access_token, user JSON)
 def signup(client: TestClient, email: str, password: str, role: str | None = None) -> Tuple[str, dict]:
     payload = {"email": email, "password": password}
     if role:
@@ -21,6 +23,7 @@ def signup(client: TestClient, email: str, password: str, role: str | None = Non
     return data["access_token"], data["user"]
 
 
+# Helper: login and return (access_token, user JSON)
 def login(client: TestClient, email: str, password: str) -> Tuple[str, dict]:
     r = client.post("/auth/login", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
@@ -28,10 +31,12 @@ def login(client: TestClient, email: str, password: str) -> Tuple[str, dict]:
     return data["access_token"], data["user"]
 
 
+# Convenience header for authenticated requests
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+# Helper: create a property owned by the authenticated landlord
 def create_property(client: TestClient, token: str, title: str, price_cents: int, requires_approval: bool = False) -> dict:
     r = client.post(
         "/api/v1/properties",
@@ -44,12 +49,16 @@ def create_property(client: TestClient, token: str, title: str, price_cents: int
 
 def create_booking(client: TestClient, token: str, property_id: int, start_date: str, end_date: str) -> dict:
     """
-    Returns:
-      {"status_code": int, "data": json or text}
-    Where json for 201 shape is:
+    Helper: POST /bookings and return a simplified envelope:
+      {
+        "status_code": number,
+        "data": JSON | text
+      }
+
+    On 201, JSON shape:
       {
         "booking": { ... },
-        "next_action": {"type":"await_approval"} | {"type":"pay","expires_at": "..."}
+        "next_action": {"type":"await_approval"} | {"type":"pay","expires_at":"...","client_secret":"..."}
       }
     """
     r = client.post(
@@ -60,6 +69,7 @@ def create_booking(client: TestClient, token: str, property_id: int, start_date:
     return {"status_code": r.status_code, "data": (r.json() if r.headers.get("content-type", "").startswith("application/json") else r.text)}
 
 
+# Auto path: property without approval -> booking goes to pending_payment with an expires_at and pay next_action
 def test_booking_auto_path_pending_payment(client: TestClient):
     # Create landlord and property (no approval required)
     landlord_token, landlord = signup(client, "host@example.com", "changeme123", "landlord")
@@ -92,6 +102,7 @@ def test_booking_auto_path_pending_payment(client: TestClient):
     assert any(b["id"] == booking["id"] for b in items)
 
 
+# Approval flow: requested -> approve -> pending_payment; separate request can be declined
 def test_booking_requires_approval_then_approve_and_decline(client: TestClient):
     landlord_token, landlord = signup(client, "host2@example.com", "changeme123", "landlord")
     prop = create_property(client, landlord_token, "Approval Place", 20000, requires_approval=True)
@@ -126,6 +137,7 @@ def test_booking_requires_approval_then_approve_and_decline(client: TestClient):
     assert declined["cancel_reason"] == "declined"
 
 
+# Overlap rule: only confirmed bookings block new requests; pending_payment does not
 def test_overlap_only_confirmed_blocks(client: TestClient):
     landlord_token, _ = signup(client, "host3@example.com", "changeme123", "landlord")
     prop = create_property(client, landlord_token, "Overlap Place", 30000, requires_approval=False)
@@ -155,6 +167,7 @@ def test_overlap_only_confirmed_blocks(client: TestClient):
     assert res3["status_code"] == 409, res3["data"]
 
 
+# Expiry sweeper: pending_payment past its hold window becomes cancelled_expired
 def test_expiry_sweeper_converts_pending_to_cancelled_expired(client: TestClient):
     landlord_token, _ = signup(client, "host4@example.com", "changeme123", "landlord")
     prop = create_property(client, landlord_token, "Expire Place", 15000, requires_approval=False)
@@ -188,6 +201,7 @@ def test_expiry_sweeper_converts_pending_to_cancelled_expired(client: TestClient
     assert found["status"] == "cancelled_expired"
 
 
+# Authorization: only owner landlord can approve/decline; tenant can cancel own booking
 def test_authorization_for_approve_decline_and_cancel(client: TestClient):
     # Landlord A owns property; Landlord B tries to approve -> 403
     token_a, user_a = signup(client, "hostA@example.com", "changeme123", "landlord")

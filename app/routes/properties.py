@@ -1,3 +1,5 @@
+# Property listing endpoints.
+# Landlords can manage their own listings; tenants/public can browse all listings.
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,11 +10,20 @@ from .. import models, schemas
 from .auth import require_landlord, get_current_user_optional
 from ..rate_limit import rate_limit
 
+# Router namespace for property APIs
 router = APIRouter()
 
 
 @router.get("/properties", response_model=List[schemas.PropertyRead])
 def list_properties(db: Session = Depends(get_db), user: Optional[models.User] = Depends(get_current_user_optional)):
+    """
+    List properties.
+
+    Behavior:
+    - If caller is a landlord, return only their properties (owner_id == user.id).
+    - Otherwise, return all properties.
+    Ordered by newest first.
+    """
     if user and user.role == "landlord":
         items = (
             db.query(models.Property)
@@ -32,7 +43,11 @@ def list_properties(db: Session = Depends(get_db), user: Optional[models.User] =
     dependencies=[Depends(rate_limit("write"))],
 )
 def create_property(payload: schemas.PropertyCreate, db: Session = Depends(get_db), user: models.User = Depends(require_landlord)):
-    # Basic server-side validation already handled by Pydantic types.
+    """
+    Create a new property owned by the authenticated landlord.
+
+    Validation is handled by Pydantic; this endpoint assigns ownership and persists the record.
+    """
     obj = models.Property(
         owner_id=user.id,
         title=payload.title,

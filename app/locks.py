@@ -1,3 +1,5 @@
+# Distributed locking helpers backed by Redis to gate critical sections across processes.
+# Designed to fail open so the application remains available if Redis is down.
 from __future__ import annotations
 
 import logging
@@ -7,18 +9,24 @@ from uuid import uuid4
 
 from .redis_client import get_redis
 
+# Namespaced logger for lock acquisition/release diagnostics
 logger = logging.getLogger("staycircle.locks")
 
 
 @contextmanager
 def redis_try_lock(key: str, ttl_ms: int = 5000) -> Iterator[bool]:
     """
-    Best-effort Redis distributed lock using SET NX PX.
-    - Returns True if the lock is acquired (or Redis is unavailable/disabled -> fail-open True).
-    - Returns False if another process holds the lock (NX not honored).
-    - Ensures safe unlock using a token-matched Lua script.
-    - Use small TTLs; this is a coarse per-resource guard (here per-property).
-    Usage:
+    Best-effort distributed lock implemented with Redis SET NX PX.
+
+    Behavior:
+    - True when the lock is acquired, or when Redis is unavailable (fail-open).
+    - False when another process holds the lock.
+    - Unlock uses a token-checked Lua script to avoid releasing a lock we don't own.
+
+    Notes:
+    - Keep TTLs small; this is a coarse per-resource guard (e.g., per property).
+    - Use as a context manager:
+
         with redis_try_lock(f"lock:booking:property:{pid}", ttl_ms=5000) as locked:
             if not locked:
                 raise HTTPException(429, "please retry")
@@ -33,16 +41,16 @@ def redis_try_lock(key: str, ttl_ms: int = 5000) -> Iterator[bool]:
     token = uuid4().hex
     acquired = False
     try:
-        # SET key token NX PX ttl_ms -> True if success, None/False otherwise
+        # SET key token NX PX ttl_ms returns True on success, falsy/None otherwise
         acquired = bool(r.set(key, token, nx=True, px=ttl_ms))
         yield acquired
     except Exception as exc:
-        # Fail-open on any unexpected Redis error
+        # Fail open on unexpected Redis errors; proceed without the lock
         logger.warning("redis_try_lock error (key=%s): %s", key, exc)
         yield True
     finally:
         if acquired:
-            # Release only if we still own the lock (token matches)
+            # Release only if we still own the lock (token matches current value)
             try:
                 r.eval(
                     """
@@ -57,5 +65,5 @@ def redis_try_lock(key: str, ttl_ms: int = 5000) -> Iterator[bool]:
                     token,
                 )
             except Exception as exc:
-                # Do not raise; lock will expire by TTL
+                # Do not raise; the lock will expire by TTL
                 logger.debug("redis_try_lock release error (key=%s): %s", key, exc)

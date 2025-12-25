@@ -1,3 +1,5 @@
+# WebSocket chat endpoints and Redis fan-out for per-property chat rooms.
+# Provides local in-process broadcast plus optional Redis Pub/Sub for multi-worker environments.
 from __future__ import annotations
 
 import asyncio
@@ -22,10 +24,13 @@ logger = logging.getLogger("staycircle.chat")
 
 class TokenBucket:
     """
-    Simple token bucket limiter.
-    - rate: tokens per second (refill)
-    - capacity: max burst tokens
-    consume(1) returns True if allowed, False if throttled.
+    Minimal token-bucket rate limiter.
+
+    Parameters:
+    - rate: tokens added per second
+    - capacity: maximum burst size
+
+    Calling consume(1) returns True if allowed; False if throttled.
     """
     def __init__(self, rate: float, capacity: int) -> None:
         self.rate = rate
@@ -47,7 +52,10 @@ class TokenBucket:
 
 class ConnectionManager:
     """
-    Tracks active connections per property and per-connection rate limiters.
+    Track active connections by property and maintain per-connection rate limiters.
+
+    Thread-safety:
+    - Uses an asyncio.Lock to guard mutations to internal maps.
     """
     def __init__(self) -> None:
         self.rooms: Dict[int, Set[WebSocket]] = {}
@@ -72,7 +80,7 @@ class ConnectionManager:
         return self.limiters.get(websocket)
 
     async def broadcast(self, property_id: int, message_text: str) -> None:
-        # Copy to avoid iteration over a mutating set
+        # Copy recipients to avoid iterating a mutating set
         recipients = list(self.rooms.get(property_id, set()))
         for ws in recipients:
             try:
@@ -91,8 +99,11 @@ manager = ConnectionManager()
 
 def start_redis_subscriber(loop: asyncio.AbstractEventLoop) -> None:
     """
-    Start a background thread that subscribes to chat:property:* and broadcasts
-    incoming messages to local WS connections. Best-effort fail-open.
+    Start a daemon thread that subscribes to 'chat:property:*' and relays messages to local WebSocket clients.
+
+    Behavior:
+    - Best-effort fail-open with exponential backoff when Redis is unavailable.
+    - Parses property_id from payload or channel name and schedules a broadcast on the given event loop.
     """
     if not is_redis_enabled():
         logger.info("redis.subscriber.disabled")
@@ -149,13 +160,13 @@ def start_redis_subscriber(loop: asyncio.AbstractEventLoop) -> None:
 
 
 def _get_token_from_ws(websocket: WebSocket) -> Optional[str]:
-    # Prefer Authorization header if present
+    # Prefer Authorization header if present (supports 'Authorization: Bearer <token>')
     auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     if auth:
         parts = auth.split(" ", 1)
         if len(parts) == 2 and parts[0].lower() == "bearer":
             return parts[1]
-    # Fallback to query param ?token=
+    # Fallback to `?token=` query parameter
     token = websocket.query_params.get("token")
     if token:
         return token
@@ -163,6 +174,13 @@ def _get_token_from_ws(websocket: WebSocket) -> Optional[str]:
 
 
 def _load_user_and_authorize(db: Session, token: str, property_id: int) -> models.User:
+    """
+    Validate JWT, load the user and property, and enforce authorization rules.
+
+    Rules:
+    - tenant: may join any property's chat
+    - landlord: must own the property
+    """
     # Decode JWT
     payload = decode_token(token)  # raises HTTPException(401) on failure
     sub = payload.get("sub")
@@ -193,12 +211,21 @@ def _load_user_and_authorize(db: Session, token: str, property_id: int) -> model
 @router.websocket("/chat/property/{property_id}")
 async def property_chat(websocket: WebSocket, property_id: int) -> None:
     """
-    WS chat per property.
-    - Auth: JWT required via Authorization: Bearer or ?token=
-    - Landlord must own the property; tenant allowed.
-    - Client -> Server: {"text": "..."} (1..1000 trim enforced)
+    WebSocket chat for a single property.
+
+    Authentication:
+    - JWT required via 'Authorization: Bearer <token>' header or ?token= query parameter
+
+    Authorization:
+    - Tenant: allowed
+    - Landlord: must own the property
+
+    Message shapes:
+    - Client -> Server: {"text": "..."} with 1..1000 characters (whitespace trimmed)
     - Server -> Clients: {"id","property_id","sender_id","text","created_at"}
-    - Rate limit: per-connection 1 msg/s, burst 5
+
+    Rate limiting:
+    - Per-connection 1 msg/s with burst capacity of 5
     """
     # Perform authentication and authorization before accept
     db: Session = SessionLocal()
@@ -315,6 +342,9 @@ async def property_chat(websocket: WebSocket, property_id: int) -> None:
 
 
 async def _send_ws_error(ws: WebSocket, code: str, message: str) -> None:
+    """
+    Send a structured error frame to the client; close the socket on failure.
+    """
     try:
         await ws.send_text(json.dumps({"type": "error", "code": code, "message": message}))
     except Exception:

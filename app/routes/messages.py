@@ -1,3 +1,5 @@
+# Message history endpoints for property chats.
+# Supports pagination via since_id and enforces role-based access.
 from typing import List, Optional
 import logging
 
@@ -8,7 +10,9 @@ from ..db import get_db
 from .. import models, schemas
 from .auth import get_current_user
 
+# Router namespace for message history APIs
 router = APIRouter()
+# Namespaced logger for chat history retrieval
 logger = logging.getLogger("staycircle.chat")
 
 
@@ -21,14 +25,19 @@ def list_messages(
     user: models.User = Depends(get_current_user),
 ) -> List[schemas.MessageRead]:
     """
-    Returns chat history for a property.
-    Authorization:
-      - tenant: allowed
-      - landlord: must own the property
-    Ordered ascending by created_at, then id (stable).
-    Supports since_id pagination (strictly greater than).
+    Return chat history for a property.
+
+    Access control:
+    - Tenant: allowed
+    - Landlord: must own the property
+
+    Ordering:
+    - Ascending by created_at, then id (stable)
+
+    Pagination:
+    - since_id: return messages with id strictly greater than this value
     """
-    # Validate property
+    # Validate property exists
     prop = db.get(models.Property, property_id)
     if not prop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
@@ -38,7 +47,7 @@ def list_messages(
         if prop.owner_id != user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not owner of property")
     elif user.role == "tenant":
-        # tenants can read (public inquiry)
+        # Tenant may read history
         pass
     else:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -62,5 +71,5 @@ def list_messages(
             "role": user.role,
         },
     )
-    # FastAPI/Pydantic will coerce ORM objects thanks to model_config(from_attributes=True)
+    # Pydantic models are configured with from_attributes=True, so ORM objects are serialized
     return items

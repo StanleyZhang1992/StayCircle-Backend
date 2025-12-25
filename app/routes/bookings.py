@@ -1,3 +1,5 @@
+# Booking endpoints: create/approve/decline/cancel and list bookings.
+# Focus on concurrency safety (Redis locks, optimistic versioning) and clean error semantics.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -16,10 +18,11 @@ from ..payments import create_payment_intent, retrieve_client_secret, stripe_ena
 
 router = APIRouter()
 
-# Sprint 7 hold configuration (wired from env in Sprint 8). Minutes to hold a pending payment.
+# Hold window (minutes) for pending payments; configurable via HOLD_MINUTES env var.
 HOLD_MINUTES = int(os.getenv("HOLD_MINUTES", "15"))
 
 
+# Sanity check for date ranges: start must be strictly before end
 def _validate_dates(start_date: date, end_date: date) -> None:
     if start_date >= end_date:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="start_date must be before end_date")
@@ -27,8 +30,11 @@ def _validate_dates(start_date: date, end_date: date) -> None:
 
 def _has_overlap(db: Session, property_id: int, start_date: date, end_date: date) -> bool:
     """
-    Overlap if NOT (existing.end_date <= start_date OR existing.start_date >= end_date)
-    Sprint 7: Only consider status='confirmed'
+    Return True if any confirmed booking overlaps [start_date, end_date).
+
+    Logic:
+    NOT (existing.end_date <= start_date OR existing.start_date >= end_date)
+    Only considers status='confirmed'.
     """
     exists = (
         db.query(models.Booking.id)
@@ -56,13 +62,13 @@ def create_booking(
     db: Session = Depends(get_db),
     user: models.User = Depends(require_tenant),
 ) -> schemas.BookingCreateResponse:
-    # Validate input
+    # Validate dates and derive number of nights
     _validate_dates(payload.start_date, payload.end_date)
     nights = (payload.end_date - payload.start_date).days
     if nights <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date range")
 
-    # Ensure property exists
+    # Ensure the property exists before proceeding
     prop = db.get(models.Property, payload.property_id)
     if not prop:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
@@ -70,24 +76,24 @@ def create_booking(
     total_cents = (prop.price_cents or 0) * nights
     currency = "USD"
 
-    # Coarse per-property lock to reduce races across processes
+    # Coarse per-property lock to limit cross-process races during availability checks and inserts
     lock_key = f"lock:booking:property:{payload.property_id}"
     with redis_try_lock(lock_key, ttl_ms=5000) as locked:
         if not locked:
-            # Another process is currently booking this property; ask client to retry shortly
+            # Another process is booking this property; instruct client to retry shortly
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={"error": "busy", "retry_after": 1},
             )
 
-        # Transactional overlap check + insert
+        # Transactional sequence: optional row lock -> overlap check -> insert booking
         try:
-            # Attempt to lock the property row for the duration (where supported)
+            # Attempt a row lock on the property where supported (skipped on SQLite)
             try:
                 if str(db.bind.dialect.name) != "sqlite":
                     db.query(models.Property).filter(models.Property.id == payload.property_id).with_for_update(nowait=False).first()
             except Exception:
-                # Some dialects/drivers may not support FOR UPDATE; proceed without row lock.
+                # Some dialects/drivers don't support FOR UPDATE; proceed without the row lock
                 pass
 
             if _has_overlap(db, payload.property_id, payload.start_date, payload.end_date):
@@ -132,13 +138,13 @@ def create_booking(
                     db.add(obj)
                     db.commit()
                 else:
-                    # Retrieve client_secret for existing intent
+                    # Reuse the existing PaymentIntent by retrieving its client_secret
                     client_secret = retrieve_client_secret(obj.payment_intent_id)
                 next_action = {"type": "pay", "expires_at": obj.expires_at, "client_secret": client_secret}
             else:
                 next_action = {"type": "await_approval"}
 
-            # Response contract includes booking and next_action
+            # Response includes the booking plus the next_action contract for the client
             return {"booking": obj, "next_action": next_action}  # type: ignore[return-value]
         except HTTPException:
             # Bubble up API errors after rolling back if needed
@@ -162,7 +168,7 @@ def list_my_bookings(
             .filter(models.Booking.guest_id == user.id)
         )
     else:
-        # Landlord: bookings on properties they own
+        # Landlord: bookings for properties they own
         q = (
             db.query(models.Booking)
             .join(models.Property, models.Property.id == models.Booking.property_id)
@@ -267,7 +273,9 @@ def cancel_booking(
     if not obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
-    # Authorization: tenant can cancel own booking; landlord can cancel if booking belongs to their property
+    # Authorization:
+    # - Tenant: may cancel own booking
+    # - Landlord: may cancel if the booking is for a property they own
     if user.role == "tenant":
         if obj.guest_id != user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to cancel this booking")
@@ -276,7 +284,7 @@ def cancel_booking(
         if not prop or prop.owner_id != user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to cancel this booking")
 
-    # Idempotent cancel: do not override terminal states other than confirmed/pending/requested
+    # Idempotent cancel: only mutate if not already in a terminal state (cancelled/declined/expired)
     if obj.status not in ("cancelled", "cancelled_expired", "declined"):
         obj.status = "cancelled"
         obj.cancel_reason = obj.cancel_reason or "cancelled"

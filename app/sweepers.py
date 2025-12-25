@@ -1,3 +1,5 @@
+# Background sweepers for periodic maintenance tasks (e.g., expiring unpaid holds).
+# These utilities are invoked from startup threads or scheduler jobs.
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -11,10 +13,17 @@ from . import models
 
 def sweep_expired_bookings(db: Optional[Session] = None) -> int:
     """
-    Transition pending_payment bookings with expires_at in the past to cancelled_expired.
+    Mark expired 'pending_payment' bookings as 'cancelled_expired'.
 
-    Returns the number of rows updated.
+    Semantics:
+    - Only processes rows with status == 'pending_payment' and expires_at < now (UTC).
+    - Idempotent across repeated runs.
+    - Accepts an optional Session; otherwise creates and cleans up its own.
+
+    Returns:
+    - Number of rows considered/updated.
     """
+    # Track whether this call created its own DB session (so we can close it)
     created_session = False
     if db is None:
         db = SessionLocal()
@@ -22,6 +31,7 @@ def sweep_expired_bookings(db: Optional[Session] = None) -> int:
 
     try:
         now = datetime.now(timezone.utc)
+        # Find all bookings that are still pending payment, but whose holds have expired
         items = (
             db.query(models.Booking)
             .filter(
@@ -32,8 +42,8 @@ def sweep_expired_bookings(db: Optional[Session] = None) -> int:
             .all()
         )
         for obj in items:
-            # Idempotent guard
-            # Normalize expires_at to timezone-aware UTC for safe comparison.
+            # Idempotent + timezone-aware guard
+            # Treat naive datetimes (e.g., SQLite) as UTC before comparing.
             exp = obj.expires_at
             if exp is not None and getattr(exp, "tzinfo", None) is None:
                 # Some backends (e.g., SQLite) may return naive datetimes; treat stored values as UTC.
@@ -48,8 +58,10 @@ def sweep_expired_bookings(db: Optional[Session] = None) -> int:
             db.commit()
         return len(items)
     except Exception:
+        # Roll back partial work, then bubble up the error
         db.rollback()
         raise
     finally:
+        # Close the session only if this function created it
         if created_session:
             db.close()
