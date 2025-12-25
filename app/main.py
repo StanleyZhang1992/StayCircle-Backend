@@ -30,23 +30,26 @@ def _start_expiry_sweeper(interval_seconds: int = 60) -> None:
     t = threading.Thread(target=_loop, name="booking-expiry-sweeper", daemon=True)
     t.start()
 
+
+def _parse_cors_origins(env_value: str | None) -> list[str]:
+    default_dev_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+    if not env_value:
+        return default_dev_origins
+    
+    origins = [o.strip() for o in env_value.split(",") if o.strip()]
+    # Wildcard is mapped to explicit dev origins so credentials can work
+    if "*" in origins:
+        return default_dev_origins
+
+    return origins
+
+
 app = FastAPI(title="StayCircle API", version="0.1.0")
-
-# CORS for frontend; configurable via CORS_ORIGINS env (comma-separated)
-# Supports wildcard "*" for local dev, or a CSV list of origins.
-origins_env = os.getenv("CORS_ORIGINS")
-if origins_env:
-    parsed_origins = [o.strip() for o in origins_env.split(",") if o.strip()]
-else:
-    # Default to localhost + 127.0.0.1 for convenience
-    parsed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
-
-# Normalize and handle wildcard by mapping to explicit dev origins so credentials can work
-dev_default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
-if "*" in parsed_origins:
-    allow_list = dev_default_origins
-else:
-    allow_list = parsed_origins
+allow_list = _parse_cors_origins(os.getenv("CORS_ORIGINS"))
 
 app.add_middleware(
     CORSMiddleware,
